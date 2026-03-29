@@ -1,5 +1,5 @@
 import streamlit as st
-import connectors
+import connectors  # Note: Ensure connectors.py does NOT 'import main'
 
 # --- SECURE CONFIGURATION LOADING ---
 # This looks for Streamlit Secrets (Cloud) first, then falls back to main.py (Local)
@@ -17,9 +17,12 @@ else:
         g_folder_def = main.G_DRIVE_FOLDER_ID
         gh_token_def = main.GITHUB_TOKEN
         gh_repo_def = main.GITHUB_REPO
-    except ImportError:
-        st.error("Missing configuration! Please set up main.py locally or Streamlit Secrets in the cloud.")
-        st.stop()
+    except (ImportError, ModuleNotFoundError):
+        ms_id_def = ""
+        g_folder_def = ""
+        gh_token_def = ""
+        gh_repo_def = ""
+        st.warning("⚠️ Configuration not found! Please set up main.py locally or Streamlit Secrets in the cloud.")
 
 st.set_page_config(page_title="Resume Sync AI: Categorized Sync", page_icon="🎯")
 st.title("🎯 Categorized Resume Agent")
@@ -28,7 +31,7 @@ st.title("🎯 Categorized Resume Agent")
 category = st.selectbox("Select Resume Category to Sync:", ["java", "python", "PHP", ".NET"])
 target_path = f"resumes/{category}" 
 
-# --- CONFIGURATION UI ---
+# --- CONFIGURATION UI (Pre-filled) ---
 with st.sidebar:
     st.header("Settings")
     ms_id = st.text_input("Microsoft Client ID", value=ms_id_def)
@@ -36,31 +39,44 @@ with st.sidebar:
     gh_repo = st.text_input("GitHub Repo", value=gh_repo_def)
     gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password")
 
+# --- SYNC LOGIC ---
 if st.button(f"🚀 Sync all {category} Resumes"):
+    if not ms_id or not g_parent_id or not gh_token:
+        st.error("Please provide all IDs in the sidebar before syncing.")
+        st.stop()
+
     with st.status(f"Processing {category} folder...", expanded=True) as status:
         
         # 1. Get existing files in the SPECIFIC OneDrive subfolder
         st.write(f"🔍 Checking OneDrive: `{target_path}`")
-        # Ensure your connectors.py functions accept folder_path!
-        existing = connectors.get_onedrive_files(ms_id, folder_path=target_path)
+        try:
+            existing = connectors.get_onedrive_files(ms_id, folder_path=target_path)
+        except Exception as e:
+            st.error(f"OneDrive Error: {e}")
+            existing = []
 
         # 2. Google Drive Logic
         st.write(f"📥 Searching Google Drive for `{category}` subfolder...")
-        g_service = connectors.get_gdrive_service()
-        
-        subfolder_query = f"name = '{category}' and '{g_parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
-        subfolder_result = g_service.files().list(q=subfolder_query).execute().get('files', [])
-        
-        if subfolder_result:
-            sub_id = subfolder_result[0]['id']
-            files = g_service.files().list(q=f"'{sub_id}' in parents").execute().get('files', [])
-            for f in files:
-                if f['name'] not in existing:
-                    content = connectors.download_from_gdrive(g_service, f['id'])
-                    connectors.upload_to_onedrive(content, f['name'], ms_id, folder_path=target_path)
-                    st.success(f"Google: {f['name']} -> OneDrive/{category}")
-        else:
-            st.warning(f"No '{category}' folder found in Google Drive.")
+        try:
+            g_service = connectors.get_gdrive_service()
+            
+            subfolder_query = f"name = '{category}' and '{g_parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
+            subfolder_result = g_service.files().list(q=subfolder_query).execute().get('files', [])
+            
+            if subfolder_result:
+                sub_id = subfolder_result[0]['id']
+                files = g_service.files().list(q=f"'{sub_id}' in parents").execute().get('files', [])
+                for f in files:
+                    if f['name'] not in existing:
+                        content = connectors.download_from_gdrive(g_service, f['id'])
+                        connectors.upload_to_onedrive(content, f['name'], ms_id, folder_path=target_path)
+                        st.success(f"Google: {f['name']} -> OneDrive/{category}")
+                    else:
+                        st.info(f"⏭️ Google: {f['name']} already in OneDrive.")
+            else:
+                st.warning(f"No '{category}' folder found in Google Drive.")
+        except Exception as e:
+            st.error(f"Google Drive Error: {e}")
 
         # 3. GitHub Logic
         try:
@@ -75,7 +91,7 @@ if st.button(f"🚀 Sync all {category} Resumes"):
                         connectors.upload_to_onedrive(f['content'], f['name'], ms_id, folder_path=target_path)
                         st.success(f"GitHub: {f['name']} -> OneDrive/{category}")
                     else:
-                        st.info(f"⏭️ {f['name']} already in OneDrive.")
+                        st.info(f"⏭️ GitHub: {f['name']} already in OneDrive.")
                         
         except Exception as e:
             st.error(f"GitHub Sync Error: {e}")
