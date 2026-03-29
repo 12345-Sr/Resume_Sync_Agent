@@ -1,100 +1,101 @@
 import streamlit as st
-import connectors  # Ensure connectors.py does NOT have 'import main' at the top
+import connectors
+import pandas as pd
 
-# --- SECURE CONFIGURATION LOADING ---
-ms_id_def = ""
-g_folder_def = ""
-gh_token_def = ""
-gh_repo_def = ""
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Multi-User Resume Sync", layout="wide")
 
-if "MICROSOFT_CLIENT_ID" in st.secrets:
-    ms_id_def = st.secrets["MICROSOFT_CLIENT_ID"]
-    g_folder_def = st.secrets["G_DRIVE_FOLDER_ID"]
-    gh_token_def = st.secrets["GITHUB_TOKEN"]
-    gh_repo_def = st.secrets["GITHUB_REPO"]
-else:
-    try:
-        import main
-        ms_id_def = main.MICROSOFT_CLIENT_ID
-        g_folder_def = main.G_DRIVE_FOLDER_ID
-        gh_token_def = main.GITHUB_TOKEN
-        gh_repo_def = main.GITHUB_REPO
-    except (ImportError, ModuleNotFoundError):
-        pass
+# --- UI HEADER ---
+st.title("📂 Multi-User Resume Sync Agent")
+st.markdown("""
+    This tool syncs resumes from **Google Drive** or **GitHub** to **OneDrive** based on the category (Java, Python, etc.) found in the logged-in user's account.
+""")
 
-st.set_page_config(page_title="Resume Sync AI", page_icon="🎯")
-st.title("🎯 Categorized Resume Agent")
-
-# --- CONFIGURATION UI (ONLY ONE SIDEBAR BLOCK) ---
+# --- SIDEBAR: AUTH & SETTINGS ---
 with st.sidebar:
-    st.header("Settings")
-    ms_id = st.text_input("Microsoft Client ID", value=ms_id_def, key="ms_id_input")
-    g_parent_id = st.text_input("Main Google Folder ID", value=g_folder_def, key="g_drive_input")
-    gh_repo = st.text_input("GitHub Repo", value=gh_repo_def, key="gh_repo_input")
-    gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password", key="gh_token_input")
-
+    st.header("🔐 Authentication")
+    
+    # Check if user is logged into Google
     if 'google_creds' in st.session_state:
-        st.success("✅ Logged in to Google")
+        st.success("✅ Connected to Google Drive")
         if st.button("🚪 Logout / Switch Account"):
             connectors.logout()
-            
-# --- CATEGORY SELECTION ---
-category = st.selectbox("Select Category:", ["java", "python", "PHP", ".NET"])
-target_path = f"resumes/{category}" 
+    else:
+        # This will trigger the login button from connectors.py
+        g_service = connectors.get_gdrive_service()
 
-# --- SYNC LOGIC (ONLY ONE BUTTON BLOCK) ---
-if st.button(f"🚀 Sync all {category} Resumes"):
-    if not ms_id or not g_parent_id or not gh_token:
-        st.error("Please ensure all IDs are filled in the sidebar.")
-        st.stop()
+    st.divider()
+    
+    # Settings for Sync
+    st.header("⚙️ Sync Settings")
+    category = st.selectbox("Select Category to Sync", ["Java", "Python", "Data Science", "DevOps"])
+    ms_client_id = st.text_input("Microsoft Client ID", value=st.secrets.get("MS_CLIENT_ID", ""))
+    target_onedrive_path = st.text_input("OneDrive Target Folder", value=f"Resumes/{category}")
 
-    with st.status(f"Processing {category} folder...", expanded=True) as status:
+# --- MAIN LOGIC: SYNC PROCESS ---
+if st.button(f"🚀 Sync {category} Resumes Now"):
+    # 1. Initialize Google Service
+    g_service = connectors.get_gdrive_service()
+    
+    with st.status(f"Scanning Google Drive for '{category}' folder...", expanded=True) as status:
+        # 2. DYNAMIC FOLDER SEARCH
+        # Instead of a hardcoded ID, we find the folder in THIS user's drive
+        g_folder_id = connectors.find_gdrive_folder(g_service, category)
         
-        # 1. Get existing files
-        st.write(f"🔍 Checking OneDrive: `{target_path}`")
-        try:
-            existing = connectors.get_onedrive_files(ms_id, folder_path=target_path)
-        except Exception as e:
-            st.error(f"OneDrive Error: {e}")
-            existing = []
+        if not g_folder_id:
+            st.error(f"❌ Folder '{category}' not found in your Google Drive. Please create it and upload resumes.")
+            st.stop()
+        
+        st.write(f"✅ Found '{category}' folder (ID: {g_folder_id})")
+        
+        # 3. Fetch Files from Google Drive
+        results = g_service.files().list(
+            q=f"'{g_folder_id}' in parents and trashed = false",
+            fields="files(id, name)"
+        ).execute()
+        files = results.get('files', [])
+        
+        if not files:
+            st.warning("⚠️ No resumes found in the Google Drive folder.")
+            st.stop()
 
-        # 2. Google Drive Logic
-        st.write(f"📥 Searching Google Drive for `{category}`...")
-        try:
-            g_service = connectors.get_gdrive_service()
-            subfolder_query = f"name = '{category}' and '{g_parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
-            subfolder_result = g_service.files().list(q=subfolder_query).execute().get('files', [])
+        # 4. Check OneDrive for existing files to avoid duplicates
+        st.write("Checking OneDrive for duplicates...")
+        existing_on_onedrive = connectors.get_onedrive_files(ms_client_id, target_onedrive_path)
+        
+        # 5. Sync Loop
+        synced_count = 0
+        for file in files:
+            file_name = file['name']
             
-            if subfolder_result:
-                sub_id = subfolder_result[0]['id']
-                files = g_service.files().list(q=f"'{sub_id}' in parents").execute().get('files', [])
-                for f in files:
-                    if f['name'] not in existing:
-                        content = connectors.download_from_gdrive(g_service, f['id'])
-                        connectors.upload_to_onedrive(content, f['name'], ms_id, folder_path=target_path)
-                        st.success(f"Google: {f['name']} -> OneDrive/{category}")
-                    else:
-                        st.info(f"⏭️ Google: {f['name']} already in OneDrive.")
-            else:
-                st.warning(f"No '{category}' folder found in Google Drive.")
-        except Exception as e:
-            st.error(f"Google Drive Error: {e}")
-
-        # 3. GitHub Logic
-        try:
-            st.write(f"📡 Checking GitHub: `{gh_repo}`...")
-            gh_files = connectors.get_github_resumes(gh_token, gh_repo, folder_path=category)
+            if file_name in existing_on_onedrive:
+                st.write(f"⏩ Skipping {file_name} (Already in OneDrive)")
+                continue
             
-            if not gh_files:
-                st.info(f"Empty or missing folder on GitHub.")
-            else:
-                for f in gh_files:
-                    if f['name'] not in existing:
-                        connectors.upload_to_onedrive(f['content'], f['name'], ms_id, folder_path=target_path)
-                        st.success(f"GitHub: {f['name']} -> OneDrive/{category}")
-                    else:
-                        st.info(f"⏭️ GitHub: {f['name']} already in OneDrive.")
-        except Exception as e:
-            st.error(f"GitHub Error: {e}")
+            st.write(f"⬇️ Downloading {file_name}...")
+            file_content = connectors.download_from_gdrive(g_service, file['id'])
+            
+            st.write(f"⬆️ Uploading {file_name} to OneDrive...")
+            status_code = connectors.upload_to_onedrive(
+                file_content, 
+                file_name, 
+                ms_client_id, 
+                target_onedrive_path
+            )
+            
+            if status_code in [200, 201]:
+                synced_count += 1
+        
+        status.update(label="✅ Sync Complete!", state="complete", expanded=False)
 
-        status.update(label=f"{category} Sync Complete!", state="complete")
+    st.success(f"Successfully synced {synced_count} new resumes to {target_onedrive_path}!")
+
+# --- DISPLAY RECENT SYNC DATA ---
+st.divider()
+st.subheader("📊 Current Session Info")
+col1, col2 = st.columns(2)
+with col1:
+    st.info(f"**Target Category:** {category}")
+with col2:
+    is_logged_in = "Yes" if 'google_creds' in st.session_state else "No"
+    st.info(f"**Authenticated:** {is_logged_in}")
