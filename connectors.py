@@ -5,6 +5,7 @@ import requests
 import msal
 import streamlit as st
 from github import Github
+from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -13,38 +14,49 @@ from googleapiclient.http import MediaIoBaseDownload
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 MS_SCOPES = ["Files.ReadWrite.All"]
 
-# --- 1. MULTI-USER GOOGLE DRIVE AUTH ---
+# --- 1. MULTI-USER GOOGLE DRIVE AUTH (WEB FLOW) ---
 def get_gdrive_service():
-    """Handles individual user login via Google OAuth 2.0."""
+    """
+    Handles individual user login via Google OAuth 2.0 Web Flow.
+    Uses 'GOOGLE_CREDENTIALS_JSON' from st.secrets.
+    """
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("Missing GOOGLE_CREDENTIALS_JSON in Streamlit Secrets.")
+        st.error("❌ GOOGLE_CREDENTIALS_JSON not found in Streamlit Secrets!")
         st.stop()
 
+    # Load the client configuration from secrets
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
     
-    # Check if this specific user already authenticated in this session
+    # Check if user is already authenticated in this session
     if 'google_creds' not in st.session_state:
-        # We use 'web' or 'installed' depending on your JSON structure
-        key = "web" if "web" in client_config else "installed"
+        # Get redirect URI from secrets, default to localhost for development
+        redirect_uri = st.secrets.get("REDIRECT_URI", "http://localhost")
         
         flow = Flow.from_client_config(
             client_config,
             scopes=GOOGLE_SCOPES,
-            redirect_uri=st.secrets.get("REDIRECT_URI", "http://localhost") 
+            redirect_uri=redirect_uri
         )
 
+        # Generate the authorization URL
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
 
-        st.info("👋 To access Google Drive, please sign in:")
-        st.link_button("Login with Google", auth_url)
+        st.info("👋 To sync Google Drive, please log in below:")
+        st.link_button("🔑 Login with Google", auth_url)
 
-        # Catch the 'code' from the URL after redirect
-        params = st.query_params
-        if "code" in params:
-            flow.fetch_token(code=params["code"])
-            st.session_state.google_creds = flow.credentials
-            st.rerun()
+        # Check if the URL contains the 'code' callback from Google
+        if "code" in st.query_params:
+            try:
+                flow.fetch_token(code=st.query_params["code"])
+                st.session_state.google_creds = flow.credentials
+                # Clean the URL and refresh the app to start the sync
+                st.query_params.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Login failed: {e}")
+                st.stop()
         else:
+            # Stop execution until the user clicks login and returns
             st.stop()
 
     return build('drive', 'v3', credentials=st.session_state.google_creds)
@@ -60,8 +72,7 @@ def download_from_gdrive(service, file_id):
 
 # --- 2. MULTI-USER MICROSOFT AUTH (DEVICE FLOW) ---
 def get_ms_token(ms_client_id):
-    """Uses Device Code Flow - Perfect for multi-user headless environments."""
-    # We store the token in session_state so the user doesn't log in twice
+    """Uses Device Code Flow for headless cloud environments."""
     if f"ms_token_{ms_client_id}" in st.session_state:
         return st.session_state[f"ms_token_{ms_client_id}"]
 
@@ -77,9 +88,9 @@ def get_ms_token(ms_client_id):
 
     st.warning("🔑 **Microsoft Login Required**")
     st.write(f"1. Go to: {flow['verification_uri']}")
-    st.write(f"2. Enter this code: **{flow['user_code']}**")
+    st.write(f"2. Enter this code: :red[**{flow['user_code']}**]")
     
-    # This waits for the user to finish on their other device
+    # This blocks until the user completes login on their device
     result = app.acquire_token_by_device_flow(flow)
     
     if "access_token" in result:
@@ -98,7 +109,10 @@ def get_github_resumes(github_token, repo_name, folder_path=""):
 
         for content in contents:
             if content.name.lower().endswith(('.pdf', '.docx')):
-                resumes.append({'name': content.name, 'content': content.decoded_content})
+                resumes.append({
+                    'name': content.name, 
+                    'content': content.decoded_content
+                })
         return resumes
     except Exception as e:
         st.error(f"GitHub Error: {e}")
@@ -118,7 +132,10 @@ def get_onedrive_files(ms_client_id, folder_path):
 def upload_to_onedrive(file_content, file_name, ms_client_id, folder_path):
     token_res = get_ms_token(ms_client_id)
     if token_res and "access_token" in token_res:
-        headers = {'Authorization': f'Bearer {token_res["access_token"]}', 'Content-Type': 'application/octet-stream'}
+        headers = {
+            'Authorization': f'Bearer {token_res["access_token"]}', 
+            'Content-Type': 'application/octet-stream'
+        }
         url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder_path}/{file_name}:/content"
         response = requests.put(url, headers=headers, data=file_content)
         return response.status_code
