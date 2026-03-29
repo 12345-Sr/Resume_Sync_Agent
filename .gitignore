@@ -1,5 +1,6 @@
 # Ignore Google Auth Token
 token_google.json
+credentials.json
 
 # Ignore Python cache files
 __pycache__/
