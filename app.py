@@ -1,5 +1,5 @@
 import streamlit as st
-import connectors  # Note: Ensure connectors.py does NOT 'import main'
+import connectors  # IMPORTANT: Make sure connectors.py does NOT have 'import main' inside it
 
 # --- SECURE CONFIGURATION LOADING ---
 # This looks for Streamlit Secrets (Cloud) first, then falls back to main.py (Local)
@@ -18,6 +18,7 @@ else:
         gh_token_def = main.GITHUB_TOKEN
         gh_repo_def = main.GITHUB_REPO
     except (ImportError, ModuleNotFoundError):
+        # Default empty values if both fail
         ms_id_def = ""
         g_folder_def = ""
         gh_token_def = ""
@@ -31,7 +32,7 @@ st.title("🎯 Categorized Resume Agent")
 category = st.selectbox("Select Resume Category to Sync:", ["java", "python", "PHP", ".NET"])
 target_path = f"resumes/{category}" 
 
-# --- CONFIGURATION UI (Pre-filled) ---
+# --- CONFIGURATION UI (Pre-filled from Secrets/Main) ---
 with st.sidebar:
     st.header("Settings")
     ms_id = st.text_input("Microsoft Client ID", value=ms_id_def)
@@ -42,7 +43,7 @@ with st.sidebar:
 # --- SYNC LOGIC ---
 if st.button(f"🚀 Sync all {category} Resumes"):
     if not ms_id or not g_parent_id or not gh_token:
-        st.error("Please provide all IDs in the sidebar before syncing.")
+        st.error("Please ensure all IDs are filled in the sidebar.")
         st.stop()
 
     with st.status(f"Processing {category} folder...", expanded=True) as status:
@@ -50,9 +51,10 @@ if st.button(f"🚀 Sync all {category} Resumes"):
         # 1. Get existing files in the SPECIFIC OneDrive subfolder
         st.write(f"🔍 Checking OneDrive: `{target_path}`")
         try:
+            # We use the connectors. prefix because we imported the whole module
             existing = connectors.get_onedrive_files(ms_id, folder_path=target_path)
         except Exception as e:
-            st.error(f"OneDrive Error: {e}")
+            st.error(f"OneDrive Connection Error: {e}")
             existing = []
 
         # 2. Google Drive Logic
