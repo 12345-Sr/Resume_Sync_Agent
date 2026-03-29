@@ -18,23 +18,20 @@ MS_SCOPES = ["Files.ReadWrite.All"]
 # --- 1. MULTI-USER GOOGLE DRIVE AUTHENTICATION ---
 
 def get_gdrive_service():
-    """
-    Handles login and prevents 'Missing code verifier' 
-    by persisting the Flow object in session_state.
-    """
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
         st.error("Missing GOOGLE_CREDENTIALS_JSON in Secrets.")
         st.stop()
 
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+    # Ensure this variable exists in your Secrets!
     redirect_uri = st.secrets.get("REDIRECT_URI")
 
-    # 1. If already authenticated for this session, return the service
+    # 1. SUCCESS: Creds already exist in session
     if 'google_creds' in st.session_state:
         return build('drive', 'v3', credentials=st.session_state.google_creds)
 
-    # 2. THE FIX: Store the Flow object in session_state
-    # This keeps the 'code_verifier' alive across the page refresh
+    # 2. STEP 1: Create the Flow and save it to session
+    # We check for 'auth_flow' to ensure we don't overwrite the verifier
     if 'auth_flow' not in st.session_state:
         st.session_state.auth_flow = Flow.from_client_config(
             client_config,
@@ -42,33 +39,40 @@ def get_gdrive_service():
             redirect_uri=redirect_uri
         )
 
-    # 3. Check if the URL contains the 'code' from Google
-    if "code" in st.query_params:
+    # 3. STEP 2: Handle the return from Google
+    # We use st.query_params to see if Google sent us a 'code'
+    params = st.query_params
+    if "code" in params:
         try:
-            # Use the SAVED flow object that has the ORIGINAL verifier
-            st.session_state.auth_flow.fetch_token(code=st.query_params["code"])
-            st.session_state.google_creds = st.session_state.auth_flow.credentials
+            # We use the flow we saved in step 2
+            flow = st.session_state.auth_flow
+            flow.fetch_token(code=params["code"])
             
-            # Cleanup: remove the flow and clear URL params
-            del st.session_state.auth_flow
+            # Save the result
+            st.session_state.google_creds = flow.credentials
+            
+            # Clean up the session to keep it light
+            if 'auth_flow' in st.session_state:
+                del st.session_state.auth_flow
+            
             st.query_params.clear()
             st.rerun()
         except Exception as e:
-            st.error(f"Login failed: {e}")
-            # Reset flow so the user can try again
+            st.error(f"❌ Login Handshake Failed: {e}")
+            # Reset everything so the user can try one more time
             if 'auth_flow' in st.session_state:
                 del st.session_state.auth_flow
             st.stop()
     
-    # 4. Show Login Button
+    # 4. STEP 3: Show the Login Button
     else:
         auth_url, _ = st.session_state.auth_flow.authorization_url(
             prompt='consent', 
             access_type='offline'
         )
-        st.info("👋 Welcome! Please log in to your Google Drive:")
+        st.info("👋 To sync Google Drive, please log in:")
         st.link_button("🔑 Login with Google", auth_url)
-        st.stop()
+        st.stop() # Prevents the rest of the app from running without login
 
 def find_gdrive_folder(service, folder_name):
     """
