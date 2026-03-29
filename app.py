@@ -30,15 +30,31 @@ st.set_page_config(page_title="Resume Sync AI", page_icon="🎯")
 st.title("🎯 Categorized Resume Agent")
 
 # --- UI SIDEBAR ---
+# --- CONFIGURATION UI (Pre-filled from Secrets/Main) ---
 with st.sidebar:
     st.header("Settings")
-    # Added 'key' arguments to every input
-    ms_id = st.text_input("Microsoft Client ID", value=ms_id_def, key="ms_client_id_input")
-    g_parent_id = st.text_input("Main Google Folder ID", value=g_folder_def, key="g_folder_id_input")
-    gh_repo = st.text_input("GitHub Repo", value=gh_repo_def, key="gh_repo_input")
-    gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password", key="gh_token_input")
-
-# --- CATEGORY SELECTION ---
+    # Added unique keys to distinguish these elements
+    ms_id = st.text_input(
+        "Microsoft Client ID", 
+        value=ms_id_def, 
+        key="ms_client_id_sidebar"
+    )
+    g_parent_id = st.text_input(
+        "Main Google Folder ID", 
+        value=g_folder_def, 
+        key="g_folder_id_sidebar"
+    )
+    gh_repo = st.text_input(
+        "GitHub Repo", 
+        value=gh_repo_def, 
+        key="gh_repo_sidebar"
+    )
+    gh_token = st.text_input(
+        "GitHub Token", 
+        value=gh_token_def, 
+        type="password", 
+        key="gh_token_sidebar"
+    )
 category = st.selectbox("Select Category:", ["java", "python", "PHP", ".NET"])
 target_path = f"resumes/{category}" 
 
