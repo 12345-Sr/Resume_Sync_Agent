@@ -12,6 +12,12 @@ from googleapiclient.http import MediaIoBaseDownload
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 MS_SCOPES = ["Files.ReadWrite.All"]
 
+# --- THE MAGIC FIX: GLOBAL CACHE FOR OAUTH FLOW ---
+# This dictionary survives across new tabs and page refreshes!
+@st.cache_resource
+def get_flow_cache():
+    return {}
+
 # --- 1. MULTI-USER GOOGLE DRIVE AUTH (WEB FLOW) ---
 
 def get_gdrive_service():
@@ -26,59 +32,61 @@ def get_gdrive_service():
     if 'google_creds' in st.session_state:
         return build('drive', 'v3', credentials=st.session_state.google_creds)
 
-    # 2. CREATE FLOW: Save it in session to keep the "Code Verifier" safe
-    if 'auth_flow' not in st.session_state:
-        st.session_state.auth_flow = Flow.from_client_config(
-            client_config,
-            scopes=GOOGLE_SCOPES,
-            redirect_uri=redirect_uri
-        )
+    params = st.query_params
+    flow_cache = get_flow_cache()
 
-    # 3. HANDLE REDIRECT: Google sent us back with a 'code'
-    if "code" in st.query_params:
-        code = st.query_params["code"]
+    # 2. HANDLE REDIRECT: Google sent us back with a 'code' and 'state'
+    if "code" in params and "state" in params:
+        state = params["state"]
         
-        # SAFETY LOCK: Prevent Streamlit from running this twice
-        if 'processing_code' not in st.session_state:
-            st.session_state.processing_code = True
+        # Retrieve the EXACT flow object from our global cache using the state
+        if state in flow_cache:
+            flow = flow_cache[state]
             try:
                 # Exchange the code for the real credentials
-                flow = st.session_state.auth_flow
-                flow.fetch_token(code=code)
+                flow.fetch_token(code=params["code"])
                 
-                # Save credentials and clean up
+                # Save credentials to this new tab's session state
                 st.session_state.google_creds = flow.credentials
-                del st.session_state.auth_flow
-                del st.session_state.processing_code
+                
+                # Clean up the cache memory
+                del flow_cache[state]
                 
                 # Clear the URL so the code is gone, then rerun
                 st.query_params.clear()
                 st.rerun()
                 
             except Exception as e:
-                # If it still fails, show exactly what URI is causing the mismatch
-                st.error("❌ Google rejected the handshake. Let's fix this.")
-                st.warning(f"**Error Details:** {e}")
-                st.info(f"**Your App is sending this Redirect URI:** `{redirect_uri}`\n\n"
-                        "Please go to Google Cloud Console and make sure the **Authorized redirect URIs** matches the above URL character-for-character.")
-                
-                # Provide a reset button
-                if st.button("🔄 Clear Error and Try Again"):
-                    st.query_params.clear()
-                    del st.session_state.auth_flow
-                    del st.session_state.processing_code
-                    st.rerun()
+                st.error(f"❌ Handshake failed: {e}")
+                st.query_params.clear()
                 st.stop()
         else:
-            # If processing_code is true, Streamlit is double-firing. Stop it here.
+            # If the server rebooted while they were logging in
+            st.error("❌ Session lost. Please close this tab and try clicking Login from the original tab again.")
+            if st.button("Start Over"):
+                st.query_params.clear()
+                st.rerun()
             st.stop()
     
-    # 4. SHOW LOGIN BUTTON
+    # 3. SHOW LOGIN BUTTON
     else:
-        auth_url, _ = st.session_state.auth_flow.authorization_url(
-            prompt='consent', 
-            access_type='offline'
+        # Create a brand new flow
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=GOOGLE_SCOPES,
+            redirect_uri=redirect_uri
         )
+        
+        # Generate the auth URL and a unique 'state' parameter
+        auth_url, state = flow.authorization_url(
+            prompt='consent', 
+            access_type='offline',
+            include_granted_scopes='true'
+        )
+        
+        # SAVE the flow in the global cache using the 'state' as the key
+        flow_cache[state] = flow
+
         st.info("👋 Welcome! Please log in to your Google Drive:")
         st.link_button("🔑 Login with Google", auth_url)
         st.stop()
