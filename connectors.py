@@ -2,6 +2,7 @@ import os
 import io
 import requests
 import msal
+import json
 import streamlit as st
 from github import Github
 from google.auth.transport.requests import Request
@@ -16,35 +17,28 @@ MS_SCOPES = ["Files.ReadWrite.All"]
 
 # --- HELPER: GOOGLE AUTH ---
 def get_gdrive_service():
-    """Authenticates using token file. On Cloud, requires token_google.json to exist."""
     creds = None
-    # 1. Try to load existing token
+    # 1. Check for token_google.json (Session Token)
     if os.path.exists('token_google.json'):
         creds = Credentials.from_authorized_user_file('token_google.json', GOOGLE_SCOPES)
     
-    # 2. If no valid creds, we handle it based on environment
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # If we are on a server, we can't run_local_server()
-            # You should generate token_google.json locally first and upload it
-            if not os.path.exists('credentials.json'):
-                st.error("credentials.json missing! Upload it to your repo.")
+            # 2. If file is missing, try reading from Streamlit Secrets
+            if "GOOGLE_CREDENTIALS_JSON" in st.secrets:
+                creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+                flow = InstalledAppFlow.from_client_config(creds_dict, GOOGLE_SCOPES)
+                
+                # IMPORTANT: On Cloud, this will still trigger the 'No Browser' error.
+                # The best way is to generate 'token_google.json' locally 
+                # and paste ITS content into Secrets too.
+                creds = flow.run_local_server(port=0) 
+            else:
+                st.error("Google Credentials not found in files or Secrets!")
                 st.stop()
-            
-            try:
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', GOOGLE_SCOPES)
-                # This only works LOCALLY. On Cloud, it will fail.
-                creds = flow.run_local_server(port=0)
-            except Exception as e:
-                st.error("Google Auth Failed. Please ensure token_google.json is uploaded for Cloud use.")
-                st.stop()
-        
-        # Save the credentials
-        with open('token_google.json', 'w') as token:
-            token.write(creds.to_json())
-            
+                
     return build('drive', 'v3', credentials=creds)
 
 def download_from_gdrive(service, file_id):
