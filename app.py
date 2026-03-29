@@ -33,6 +33,11 @@ with st.sidebar:
     gh_repo = st.text_input("GitHub Repo", value=gh_repo_def, key="gh_repo_input")
     gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password", key="gh_token_input")
 
+    if 'google_creds' in st.session_state:
+        st.success("✅ Logged in to Google")
+        if st.button("🚪 Logout / Switch Account"):
+            connectors.logout()
+            
 # --- CATEGORY SELECTION ---
 category = st.selectbox("Select Category:", ["java", "python", "PHP", ".NET"])
 target_path = f"resumes/{category}" 

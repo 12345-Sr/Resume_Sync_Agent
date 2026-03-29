@@ -5,64 +5,82 @@ import requests
 import msal
 import streamlit as st
 from github import Github
-from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
 # --- API SCOPES ---
+# These define what the app is allowed to do. 
+# 'readonly' for Google Drive is safer for a resume agent.
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 MS_SCOPES = ["Files.ReadWrite.All"]
 
-# --- 1. MULTI-USER GOOGLE DRIVE AUTH (WEB FLOW) ---
+# --- 1. MULTI-USER GOOGLE DRIVE AUTHENTICATION ---
+
 def get_gdrive_service():
-    """Handles multi-user login and catches the 'code' from the URL."""
+    """
+    Handles individual user login via Google OAuth 2.0 Web Flow.
+    Stores credentials in st.session_state to keep users isolated.
+    """
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("Missing GOOGLE_CREDENTIALS_JSON in Secrets.")
+        st.error("❌ Setup Error: GOOGLE_CREDENTIALS_JSON not found in Streamlit Secrets.")
         st.stop()
 
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
-    
-    # Check if we already have credentials for this session
-    if 'google_creds' not in st.session_state:
-        # Use the exact Redirect URI from your Secrets
-        redirect_uri = st.secrets.get("REDIRECT_URI")
-        
-        flow = Flow.from_client_config(
+    redirect_uri = st.secrets.get("REDIRECT_URI")
+
+    # 1. Check if user is already authenticated in this session
+    if 'google_creds' in st.session_state:
+        return build('drive', 'v3', credentials=st.session_state.google_creds)
+
+    # 2. Store 'Flow' in session state. 
+    # This prevents the 'Missing code verifier' error during page reruns.
+    if 'auth_flow' not in st.session_state:
+        st.session_state.auth_flow = Flow.from_client_config(
             client_config,
             scopes=GOOGLE_SCOPES,
             redirect_uri=redirect_uri
         )
 
-        # 1. Look at the URL bar (st.query_params)
-        # If 'code' is there, the user JUST finished logging in
-        if "code" in st.query_params:
-            try:
-                # Exchange the code from the URL for real credentials
-                flow.fetch_token(code=st.query_params["code"])
-                st.session_state.google_creds = flow.credentials
-                
-                # IMPORTANT: Clear the URL parameters so they don't trigger again
-                st.query_params.clear()
-                
-                # Refresh the app so it moves past the login screen
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to exchange code: {e}")
-                st.stop()
-        
-        # 2. If 'code' is NOT in the URL, show the login button
-        else:
-            auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-            st.info("👋 To sync Google Drive, please sign in:")
-            st.link_button("🔑 Login with Google", auth_url)
-            # Stop execution here until they click and come back with a 'code'
+    # 3. Handle the Redirect Callback (the 'code' from Google)
+    if "code" in st.query_params:
+        try:
+            # Exchange the code in the URL for actual credentials
+            st.session_state.auth_flow.fetch_token(code=st.query_params["code"])
+            st.session_state.google_creds = st.session_state.auth_flow.credentials
+            
+            # Cleanup: remove the flow and clear the URL parameters
+            del st.session_state.auth_flow
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Login failed: {e}")
+            if 'auth_flow' in st.session_state: 
+                del st.session_state.auth_flow
             st.stop()
+    
+    # 4. Show Login Button if no 'code' and no 'creds'
+    else:
+        auth_url, _ = st.session_state.auth_flow.authorization_url(
+            prompt='consent', 
+            access_type='offline'
+        )
+        st.info("👋 Welcome! Please log in to your Google Drive to sync resumes:")
+        st.link_button("🔑 Login with Google", auth_url)
+        st.stop()
 
-    # If we reach here, we have credentials in session_state
-    return build('drive', 'v3', credentials=st.session_state.google_creds)
+def find_gdrive_folder(service, folder_name):
+    """
+    Searches the current logged-in user's Drive for a folder by name.
+    Useful for finding 'Java', 'Python', or 'Resumes' folders.
+    """
+    query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+    items = results.get('files', [])
+    return items[0]['id'] if items else None
 
 def download_from_gdrive(service, file_id):
+    """Downloads a file from Google Drive as binary data."""
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -71,11 +89,14 @@ def download_from_gdrive(service, file_id):
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-# --- 2. MULTI-USER MICROSOFT AUTH (DEVICE FLOW) ---
+
+# --- 2. MULTI-USER MICROSOFT AUTHENTICATION (DEVICE FLOW) ---
+
 def get_ms_token(ms_client_id):
-    """Uses Device Code Flow for headless cloud environments."""
-    if f"ms_token_{ms_client_id}" in st.session_state:
-        return st.session_state[f"ms_token_{ms_client_id}"]
+    """Uses Device Code Flow - each user authenticates their own OneDrive."""
+    session_key = f"ms_token_{ms_client_id}"
+    if session_key in st.session_state:
+        return st.session_state[session_key]
 
     app = msal.PublicClientApplication(
         ms_client_id, 
@@ -91,22 +112,26 @@ def get_ms_token(ms_client_id):
     st.write(f"1. Go to: {flow['verification_uri']}")
     st.write(f"2. Enter this code: :red[**{flow['user_code']}**]")
     
-    # This blocks until the user completes login on their device
+    # This blocks until the user enters the code on their other device
     result = app.acquire_token_by_device_flow(flow)
     
     if "access_token" in result:
-        st.session_state[f"ms_token_{ms_client_id}"] = result
+        st.session_state[session_key] = result
         return result
     return None
 
+
 # --- 3. GITHUB CONNECTOR ---
+
 def get_github_resumes(github_token, repo_name, folder_path=""):
+    """Fetches PDF/DOCX resumes from a specific GitHub repo folder."""
     g = Github(github_token)
     try:
         repo = g.get_repo(repo_name)
         contents = repo.get_contents(folder_path)
         resumes = []
-        if not isinstance(contents, list): contents = [contents]
+        if not isinstance(contents, list): 
+            contents = [contents]
 
         for content in contents:
             if content.name.lower().endswith(('.pdf', '.docx')):
@@ -119,8 +144,11 @@ def get_github_resumes(github_token, repo_name, folder_path=""):
         st.error(f"GitHub Error: {e}")
         return []
 
+
 # --- 4. ONEDRIVE CONNECTORS ---
+
 def get_onedrive_files(ms_client_id, folder_path):
+    """Lists files already in the target OneDrive folder to prevent duplicates."""
     token_res = get_ms_token(ms_client_id)
     if token_res and "access_token" in token_res:
         headers = {'Authorization': f'Bearer {token_res["access_token"]}'}
@@ -131,6 +159,7 @@ def get_onedrive_files(ms_client_id, folder_path):
     return []
 
 def upload_to_onedrive(file_content, file_name, ms_client_id, folder_path):
+    """Uploads binary content to a specific folder in OneDrive."""
     token_res = get_ms_token(ms_client_id)
     if token_res and "access_token" in token_res:
         headers = {
@@ -141,3 +170,12 @@ def upload_to_onedrive(file_content, file_name, ms_client_id, folder_path):
         response = requests.put(url, headers=headers, data=file_content)
         return response.status_code
     return None
+
+
+# --- 5. SESSION CLEANUP (LOGOUT) ---
+
+def logout():
+    """Clears the session so a different user can log in."""
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
