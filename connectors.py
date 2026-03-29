@@ -19,7 +19,7 @@ MS_SCOPES = ["Files.ReadWrite.All"]
 
 def get_gdrive_service():
     """
-    Handles individual user login and prevents 'Missing code verifier' 
+    Handles login and prevents 'Missing code verifier' 
     by persisting the Flow object in session_state.
     """
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
@@ -33,8 +33,8 @@ def get_gdrive_service():
     if 'google_creds' in st.session_state:
         return build('drive', 'v3', credentials=st.session_state.google_creds)
 
-    # 2. STORE THE FLOW OBJECT IN SESSION STATE
-    # This is the "Magic Fix" for 'Missing code verifier'
+    # 2. THE FIX: Store the Flow object in session_state
+    # This keeps the 'code_verifier' alive across the page refresh
     if 'auth_flow' not in st.session_state:
         st.session_state.auth_flow = Flow.from_client_config(
             client_config,
@@ -45,7 +45,7 @@ def get_gdrive_service():
     # 3. Check if the URL contains the 'code' from Google
     if "code" in st.query_params:
         try:
-            # We use the SAVED flow object that has the ORIGINAL verifier
+            # Use the SAVED flow object that has the ORIGINAL verifier
             st.session_state.auth_flow.fetch_token(code=st.query_params["code"])
             st.session_state.google_creds = st.session_state.auth_flow.credentials
             
@@ -55,12 +55,12 @@ def get_gdrive_service():
             st.rerun()
         except Exception as e:
             st.error(f"Login failed: {e}")
-            # If it fails, clear the flow so the user can try again fresh
+            # Reset flow so the user can try again
             if 'auth_flow' in st.session_state:
                 del st.session_state.auth_flow
             st.stop()
     
-    # 4. Show Login Button if no 'code' in URL
+    # 4. Show Login Button
     else:
         auth_url, _ = st.session_state.auth_flow.authorization_url(
             prompt='consent', 
