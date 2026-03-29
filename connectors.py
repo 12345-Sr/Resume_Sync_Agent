@@ -16,20 +16,23 @@ MS_SCOPES = ["Files.ReadWrite.All"]
 
 # --- 1. MULTI-USER GOOGLE DRIVE AUTH (WEB FLOW) ---
 def get_gdrive_service():
-    """
-    Handles individual user login via Google OAuth 2.0 Web Flow.
-    Uses 'GOOGLE_CREDENTIALS_JSON' from st.secrets.
-    """
-    if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("❌ GOOGLE_CREDENTIALS_JSON not found in Streamlit Secrets!")
-        st.stop()
-
-    # Load the client configuration from secrets
-    client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+    """Handles multi-user login using Web App credentials from Secrets."""
     
-    # Check if user is already authenticated in this session
+    # 1. Check the 'Vault' (Streamlit Secrets)
+    if "GOOGLE_CREDENTIALS_JSON" in st.secrets:
+        # We load the text directly from the Cloud memory
+        client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+    else:
+        # 2. Local Fallback (Only for your PC)
+        try:
+            with open('GOOGLE_CREDENTIALS_JSON.json', 'r') as f:
+                client_config = json.load(f)
+        except FileNotFoundError:
+            st.error("❌ Setup Error: No Secret found on Cloud, and no 'GOOGLE_CREDENTIALS_JSON.json' found locally.")
+            st.stop()
+
+    # 3. Proceed with the Multi-User Login
     if 'google_creds' not in st.session_state:
-        # Get redirect URI from secrets, default to localhost for development
         redirect_uri = st.secrets.get("REDIRECT_URI", "http://localhost")
         
         flow = Flow.from_client_config(
@@ -38,25 +41,15 @@ def get_gdrive_service():
             redirect_uri=redirect_uri
         )
 
-        # Generate the authorization URL
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-
-        st.info("👋 To sync Google Drive, please log in below:")
+        st.info("👋 Please log in to Google Drive:")
         st.link_button("🔑 Login with Google", auth_url)
 
-        # Check if the URL contains the 'code' callback from Google
         if "code" in st.query_params:
-            try:
-                flow.fetch_token(code=st.query_params["code"])
-                st.session_state.google_creds = flow.credentials
-                # Clean the URL and refresh the app to start the sync
-                st.query_params.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Login failed: {e}")
-                st.stop()
+            flow.fetch_token(code=st.query_params["code"])
+            st.session_state.google_creds = flow.credentials
+            st.rerun()
         else:
-            # Stop execution until the user clicks login and returns
             st.stop()
 
     return build('drive', 'v3', credentials=st.session_state.google_creds)
