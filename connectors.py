@@ -19,22 +19,22 @@ MS_SCOPES = ["Files.ReadWrite.All"]
 
 def get_gdrive_service():
     """
-    Handles individual user login via Google OAuth 2.0 Web Flow.
-    Stores credentials in st.session_state to keep users isolated.
+    Handles individual user login and prevents 'Missing code verifier' 
+    by persisting the Flow object in session_state.
     """
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("❌ Setup Error: GOOGLE_CREDENTIALS_JSON not found in Streamlit Secrets.")
+        st.error("Missing GOOGLE_CREDENTIALS_JSON in Secrets.")
         st.stop()
 
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
     redirect_uri = st.secrets.get("REDIRECT_URI")
 
-    # 1. Check if user is already authenticated in this session
+    # 1. If already authenticated for this session, return the service
     if 'google_creds' in st.session_state:
         return build('drive', 'v3', credentials=st.session_state.google_creds)
 
-    # 2. Store 'Flow' in session state. 
-    # This prevents the 'Missing code verifier' error during page reruns.
+    # 2. STORE THE FLOW OBJECT IN SESSION STATE
+    # This is the "Magic Fix" for 'Missing code verifier'
     if 'auth_flow' not in st.session_state:
         st.session_state.auth_flow = Flow.from_client_config(
             client_config,
@@ -42,30 +42,31 @@ def get_gdrive_service():
             redirect_uri=redirect_uri
         )
 
-    # 3. Handle the Redirect Callback (the 'code' from Google)
+    # 3. Check if the URL contains the 'code' from Google
     if "code" in st.query_params:
         try:
-            # Exchange the code in the URL for actual credentials
+            # We use the SAVED flow object that has the ORIGINAL verifier
             st.session_state.auth_flow.fetch_token(code=st.query_params["code"])
             st.session_state.google_creds = st.session_state.auth_flow.credentials
             
-            # Cleanup: remove the flow and clear the URL parameters
+            # Cleanup: remove the flow and clear URL params
             del st.session_state.auth_flow
             st.query_params.clear()
             st.rerun()
         except Exception as e:
             st.error(f"Login failed: {e}")
-            if 'auth_flow' in st.session_state: 
+            # If it fails, clear the flow so the user can try again fresh
+            if 'auth_flow' in st.session_state:
                 del st.session_state.auth_flow
             st.stop()
     
-    # 4. Show Login Button if no 'code' and no 'creds'
+    # 4. Show Login Button if no 'code' in URL
     else:
         auth_url, _ = st.session_state.auth_flow.authorization_url(
             prompt='consent', 
             access_type='offline'
         )
-        st.info("👋 Welcome! Please log in to your Google Drive to sync resumes:")
+        st.info("👋 Welcome! Please log in to your Google Drive:")
         st.link_button("🔑 Login with Google", auth_url)
         st.stop()
 
