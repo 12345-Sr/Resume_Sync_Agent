@@ -1,16 +1,21 @@
 import streamlit as st
-import connectors  # IMPORTANT: Make sure connectors.py does NOT have 'import main' inside it
+import connectors  # Ensure connectors.py does NOT have 'import main' at the top
 
 # --- SECURE CONFIGURATION LOADING ---
-# This looks for Streamlit Secrets (Cloud) first, then falls back to main.py (Local)
+# We use a try/except block so the app doesn't crash if main.py is missing
+ms_id_def = ""
+g_folder_def = ""
+gh_token_def = ""
+gh_repo_def = ""
+
 if "MICROSOFT_CLIENT_ID" in st.secrets:
-    # We are in the Cloud! Use the Secrets Vault
+    # 1. Check Streamlit Cloud Secrets first
     ms_id_def = st.secrets["MICROSOFT_CLIENT_ID"]
     g_folder_def = st.secrets["G_DRIVE_FOLDER_ID"]
     gh_token_def = st.secrets["GITHUB_TOKEN"]
     gh_repo_def = st.secrets["GITHUB_REPO"]
 else:
-    # We are running locally! Try to import main.py
+    # 2. If not in cloud, try local main.py
     try:
         import main
         ms_id_def = main.MICROSOFT_CLIENT_ID
@@ -18,19 +23,31 @@ else:
         gh_token_def = main.GITHUB_TOKEN
         gh_repo_def = main.GITHUB_REPO
     except (ImportError, ModuleNotFoundError):
-        # Default empty values if both fail
-        ms_id_def = ""
-        g_folder_def = ""
-        gh_token_def = ""
-        gh_repo_def = ""
-        st.warning("⚠️ Configuration not found! Please set up main.py locally or Streamlit Secrets in the cloud.")
+        # 3. If both fail, we just leave defaults as empty strings
+        pass
 
-st.set_page_config(page_title="Resume Sync AI: Categorized Sync", page_icon="🎯")
+st.set_page_config(page_title="Resume Sync AI", page_icon="🎯")
 st.title("🎯 Categorized Resume Agent")
 
+# --- UI SIDEBAR ---
+with st.sidebar:
+    st.header("Settings")
+    # The 'value' will now be pre-filled from Secrets OR Main OR remain empty
+    ms_id = st.text_input("Microsoft Client ID", value=ms_id_def)
+    g_parent_id = st.text_input("Main Google Folder ID", value=g_folder_def)
+    gh_repo = st.text_input("GitHub Repo", value=gh_repo_def)
+    gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password")
+
 # --- CATEGORY SELECTION ---
-category = st.selectbox("Select Resume Category to Sync:", ["java", "python", "PHP", ".NET"])
+category = st.selectbox("Select Category:", ["java", "python", "PHP", ".NET"])
 target_path = f"resumes/{category}" 
+
+if st.button(f"🚀 Sync {category} Resumes"):
+    if not ms_id or not g_parent_id or not gh_token:
+        st.error("Missing configuration! Please fill the sidebar or set Streamlit Secrets.")
+    else:
+        # Your sync logic here...
+        st.write(f"Syncing {category}...")
 
 # --- CONFIGURATION UI (Pre-filled from Secrets/Main) ---
 with st.sidebar:
