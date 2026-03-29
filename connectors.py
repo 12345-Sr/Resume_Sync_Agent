@@ -9,29 +9,24 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# --- API SCOPES ---
-# These define what the app is allowed to do. 
-# 'readonly' for Google Drive is safer for a resume agent.
 GOOGLE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 MS_SCOPES = ["Files.ReadWrite.All"]
 
-# --- 1. MULTI-USER GOOGLE DRIVE AUTHENTICATION ---
+# --- 1. MULTI-USER GOOGLE DRIVE AUTH (WEB FLOW) ---
 
 def get_gdrive_service():
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
-        st.error("Missing GOOGLE_CREDENTIALS_JSON in Secrets.")
+        st.error("❌ Setup Error: GOOGLE_CREDENTIALS_JSON not found in Streamlit Secrets.")
         st.stop()
 
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
-    # Ensure this variable exists in your Secrets!
     redirect_uri = st.secrets.get("REDIRECT_URI")
 
-    # 1. SUCCESS: Creds already exist in session
+    # 1. SUCCESS: Already logged in
     if 'google_creds' in st.session_state:
         return build('drive', 'v3', credentials=st.session_state.google_creds)
 
-    # 2. STEP 1: Create the Flow and save it to session
-    # We check for 'auth_flow' to ensure we don't overwrite the verifier
+    # 2. CREATE FLOW: Save it in session to keep the "Code Verifier" safe
     if 'auth_flow' not in st.session_state:
         st.session_state.auth_flow = Flow.from_client_config(
             client_config,
@@ -39,53 +34,62 @@ def get_gdrive_service():
             redirect_uri=redirect_uri
         )
 
-    # 3. STEP 2: Handle the return from Google
-    # We use st.query_params to see if Google sent us a 'code'
-    params = st.query_params
-    if "code" in params:
-        try:
-            # We use the flow we saved in step 2
-            flow = st.session_state.auth_flow
-            flow.fetch_token(code=params["code"])
-            
-            # Save the result
-            st.session_state.google_creds = flow.credentials
-            
-            # Clean up the session to keep it light
-            if 'auth_flow' in st.session_state:
+    # 3. HANDLE REDIRECT: Google sent us back with a 'code'
+    if "code" in st.query_params:
+        code = st.query_params["code"]
+        
+        # SAFETY LOCK: Prevent Streamlit from running this twice
+        if 'processing_code' not in st.session_state:
+            st.session_state.processing_code = True
+            try:
+                # Exchange the code for the real credentials
+                flow = st.session_state.auth_flow
+                flow.fetch_token(code=code)
+                
+                # Save credentials and clean up
+                st.session_state.google_creds = flow.credentials
                 del st.session_state.auth_flow
-            
-            st.query_params.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"❌ Login Handshake Failed: {e}")
-            # Reset everything so the user can try one more time
-            if 'auth_flow' in st.session_state:
-                del st.session_state.auth_flow
+                del st.session_state.processing_code
+                
+                # Clear the URL so the code is gone, then rerun
+                st.query_params.clear()
+                st.rerun()
+                
+            except Exception as e:
+                # If it still fails, show exactly what URI is causing the mismatch
+                st.error("❌ Google rejected the handshake. Let's fix this.")
+                st.warning(f"**Error Details:** {e}")
+                st.info(f"**Your App is sending this Redirect URI:** `{redirect_uri}`\n\n"
+                        "Please go to Google Cloud Console and make sure the **Authorized redirect URIs** matches the above URL character-for-character.")
+                
+                # Provide a reset button
+                if st.button("🔄 Clear Error and Try Again"):
+                    st.query_params.clear()
+                    del st.session_state.auth_flow
+                    del st.session_state.processing_code
+                    st.rerun()
+                st.stop()
+        else:
+            # If processing_code is true, Streamlit is double-firing. Stop it here.
             st.stop()
     
-    # 4. STEP 3: Show the Login Button
+    # 4. SHOW LOGIN BUTTON
     else:
         auth_url, _ = st.session_state.auth_flow.authorization_url(
             prompt='consent', 
             access_type='offline'
         )
-        st.info("👋 To sync Google Drive, please log in:")
+        st.info("👋 Welcome! Please log in to your Google Drive:")
         st.link_button("🔑 Login with Google", auth_url)
-        st.stop() # Prevents the rest of the app from running without login
+        st.stop()
 
 def find_gdrive_folder(service, folder_name):
-    """
-    Searches the current logged-in user's Drive for a folder by name.
-    Useful for finding 'Java', 'Python', or 'Resumes' folders.
-    """
     query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     results = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     items = results.get('files', [])
     return items[0]['id'] if items else None
 
 def download_from_gdrive(service, file_id):
-    """Downloads a file from Google Drive as binary data."""
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -94,21 +98,15 @@ def download_from_gdrive(service, file_id):
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-
-# --- 2. MULTI-USER MICROSOFT AUTHENTICATION (DEVICE FLOW) ---
-
+# --- 2. MULTI-USER MICROSOFT AUTH (DEVICE FLOW) ---
 def get_ms_token(ms_client_id):
-    """Uses Device Code Flow - each user authenticates their own OneDrive."""
     session_key = f"ms_token_{ms_client_id}"
     if session_key in st.session_state:
         return st.session_state[session_key]
 
-    app = msal.PublicClientApplication(
-        ms_client_id, 
-        authority="https://login.microsoftonline.com/common"
-    )
-    
+    app = msal.PublicClientApplication(ms_client_id, authority="https://login.microsoftonline.com/common")
     flow = app.initiate_device_flow(scopes=MS_SCOPES)
+    
     if "user_code" not in flow:
         st.error("Microsoft Auth Error: Check your Client ID.")
         st.stop()
@@ -117,43 +115,30 @@ def get_ms_token(ms_client_id):
     st.write(f"1. Go to: {flow['verification_uri']}")
     st.write(f"2. Enter this code: :red[**{flow['user_code']}**]")
     
-    # This blocks until the user enters the code on their other device
     result = app.acquire_token_by_device_flow(flow)
-    
     if "access_token" in result:
         st.session_state[session_key] = result
         return result
     return None
 
-
 # --- 3. GITHUB CONNECTOR ---
-
 def get_github_resumes(github_token, repo_name, folder_path=""):
-    """Fetches PDF/DOCX resumes from a specific GitHub repo folder."""
     g = Github(github_token)
     try:
         repo = g.get_repo(repo_name)
         contents = repo.get_contents(folder_path)
         resumes = []
-        if not isinstance(contents, list): 
-            contents = [contents]
-
+        if not isinstance(contents, list): contents = [contents]
         for content in contents:
             if content.name.lower().endswith(('.pdf', '.docx')):
-                resumes.append({
-                    'name': content.name, 
-                    'content': content.decoded_content
-                })
+                resumes.append({'name': content.name, 'content': content.decoded_content})
         return resumes
     except Exception as e:
         st.error(f"GitHub Error: {e}")
         return []
 
-
 # --- 4. ONEDRIVE CONNECTORS ---
-
 def get_onedrive_files(ms_client_id, folder_path):
-    """Lists files already in the target OneDrive folder to prevent duplicates."""
     token_res = get_ms_token(ms_client_id)
     if token_res and "access_token" in token_res:
         headers = {'Authorization': f'Bearer {token_res["access_token"]}'}
@@ -164,23 +149,16 @@ def get_onedrive_files(ms_client_id, folder_path):
     return []
 
 def upload_to_onedrive(file_content, file_name, ms_client_id, folder_path):
-    """Uploads binary content to a specific folder in OneDrive."""
     token_res = get_ms_token(ms_client_id)
     if token_res and "access_token" in token_res:
-        headers = {
-            'Authorization': f'Bearer {token_res["access_token"]}', 
-            'Content-Type': 'application/octet-stream'
-        }
+        headers = {'Authorization': f'Bearer {token_res["access_token"]}', 'Content-Type': 'application/octet-stream'}
         url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder_path}/{file_name}:/content"
         response = requests.put(url, headers=headers, data=file_content)
         return response.status_code
     return None
 
-
-# --- 5. SESSION CLEANUP (LOGOUT) ---
-
+# --- 5. LOGOUT ---
 def logout():
-    """Clears the session so a different user can log in."""
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
