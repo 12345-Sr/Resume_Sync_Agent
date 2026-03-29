@@ -32,11 +32,11 @@ st.title("🎯 Categorized Resume Agent")
 # --- UI SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
-    # The 'value' will now be pre-filled from Secrets OR Main OR remain empty
-    ms_id = st.text_input("Microsoft Client ID", value=ms_id_def)
-    g_parent_id = st.text_input("Main Google Folder ID", value=g_folder_def)
-    gh_repo = st.text_input("GitHub Repo", value=gh_repo_def)
-    gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password")
+    # Added 'key' arguments to every input
+    ms_id = st.text_input("Microsoft Client ID", value=ms_id_def, key="ms_client_id_input")
+    g_parent_id = st.text_input("Main Google Folder ID", value=g_folder_def, key="g_folder_id_input")
+    gh_repo = st.text_input("GitHub Repo", value=gh_repo_def, key="gh_repo_input")
+    gh_token = st.text_input("GitHub Token", value=gh_token_def, type="password", key="gh_token_input")
 
 # --- CATEGORY SELECTION ---
 category = st.selectbox("Select Category:", ["java", "python", "PHP", ".NET"])
