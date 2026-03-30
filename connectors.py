@@ -129,20 +129,47 @@ def get_ms_token(ms_client_id):
         return result
     return None
 
-# --- 3. GITHUB CONNECTOR ---
-def get_github_resumes(github_token, repo_name, folder_path=""):
+# --- 3. GLOBAL GITHUB CONNECTOR ---
+def get_global_github_resumes(github_token, keyword, max_results=10):
+    """Searches ALL public GitHub repositories for resumes matching the keyword."""
     g = Github(github_token)
+    resumes = []
+    
     try:
-        repo = g.get_repo(repo_name)
-        contents = repo.get_contents(folder_path)
-        resumes = []
-        if not isinstance(contents, list): contents = [contents]
-        for content in contents:
-            if content.name.lower().endswith(('.pdf', '.docx')):
-                resumes.append({'name': content.name, 'content': content.decoded_content})
+        # Construct the global search query
+        query = f"{keyword} resume extension:pdf"
+        results = g.search_code(query=query)
+        
+        count = 0
+        for file in results:
+            if count >= max_results:
+                break
+                
+            try:
+                # Create a unique name to prevent overwriting files with the same name
+                repo_owner = file.repository.owner.login
+                safe_name = f"{repo_owner}_{file.name}"
+                
+                # Bypass the 1MB GitHub API limit by downloading raw URLs
+                if file.download_url:
+                    response = requests.get(file.download_url)
+                    if response.status_code == 200:
+                        file_content = response.content
+                    else:
+                        continue 
+                else:
+                    file_content = file.decoded_content
+                
+                resumes.append({'name': safe_name, 'content': file_content})
+                count += 1
+                
+            except Exception as dl_err:
+                continue # Skip files that cause errors and move to the next
+                
         return resumes
+        
     except Exception as e:
-        st.error(f"GitHub Error: {e}")
+        st.error(f"❌ Global GitHub Search Error: {e}")
         return []
 
 # --- 4. ONEDRIVE CONNECTORS ---
