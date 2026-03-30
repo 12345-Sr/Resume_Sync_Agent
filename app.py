@@ -4,6 +4,11 @@ import connectors
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Multi-Source Resume Sync", layout="wide")
 
+# 1. ALWAYS PROCESS GOOGLE REDIRECT FIRST
+# This catches the 'code' when you return from Google's login page
+if "code" in st.query_params:
+    connectors.get_gdrive_service()
+
 # --- UI HEADER ---
 st.title("🚀 Multi-Source Resume Sync Agent")
 st.markdown("""
@@ -11,32 +16,42 @@ st.markdown("""
     and push them directly to your **Microsoft OneDrive**.
 """)
 
-# --- SIDEBAR: AUTH & SECRETS ---
+# --- SIDEBAR: CONNECTIONS DASHBOARD ---
 with st.sidebar:
-    st.header("🔐 Authentication")
+    st.header("🔗 Step 1: Connect Accounts")
     
-    # 1. Google Auth Check
-    # Note: If not logged in, this function halts the app and shows the login button.
-    if 'google_creds' in st.session_state:
-        st.success("✅ Connected to Google Drive")
-        if st.button("🚪 Logout from Google"):
+    # --- GOOGLE AUTH CHECK ---
+    # Unpack the tuple to prevent the AttributeError!
+    g_service, g_auth_url = connectors.get_gdrive_service()
+    
+    if g_service:
+        st.success("✅ Google Drive Connected")
+        if st.button("🚪 Logout All Accounts"):
             connectors.logout()
-    else:
-        g_service = connectors.get_gdrive_service()
+    elif g_auth_url:
+        st.warning("⚠️ Google Drive Disconnected")
+        st.link_button("🔑 Login to Google Drive", g_auth_url)
 
     st.divider()
     
-    st.header("⚙️ Core System")
-    # 2. Hide Microsoft Client ID (Secure Backend Loading)
+    # --- MICROSOFT AUTH CHECK ---
     ms_client_id = st.secrets.get("MS_CLIENT_ID")
     if not ms_client_id:
         st.error("❌ Developer Error: MS_CLIENT_ID missing from secrets.")
         st.stop()
+        
+    ms_connected = connectors.is_ms_connected(ms_client_id)
+    
+    if ms_connected:
+        st.success("✅ OneDrive Connected")
     else:
-        st.success("✅ Microsoft OneDrive Ready")
+        st.warning("⚠️ OneDrive Disconnected")
+        if st.button("☁️ Connect OneDrive"):
+            # Triggers the Device Code flow seamlessly in the sidebar
+            connectors.trigger_ms_login(ms_client_id, st.sidebar)
+
 
 # --- MAIN UI: TABS ---
-# Create two distinct tabs so the UI doesn't get cluttered
 tab1, tab2 = st.tabs(["📂 Sync from Google Drive", "🌍 Global GitHub Search"])
 
 
@@ -50,14 +65,22 @@ with tab1:
     # Settings
     col1, col2 = st.columns(2)
     with col1:
+        # Added 'SAP' to match your latest code
         g_category = st.selectbox("Select Category Folder", ["Java", "Python", "Data Science", "DevOps", "SAP"], key="g_cat")
     with col2:
         g_target_path = st.text_input("OneDrive Target Folder", value=f"Resumes/{g_category}", key="g_path")
 
     # Action Button
     if st.button(f"🚀 Sync '{g_category}' from Google Drive"):
-        g_service = connectors.get_gdrive_service()
         
+        # PRE-FLIGHT CHECKS
+        if not g_service:
+            st.error("❌ Please connect Google Drive in the sidebar first.")
+            st.stop()
+        if not ms_connected:
+            st.error("❌ Please connect Microsoft OneDrive in the sidebar first.")
+            st.stop()
+            
         with st.status(f"Scanning Google Drive for '{g_category}'...", expanded=True) as status:
             # 1. Find Folder
             g_folder_id = connectors.find_gdrive_folder(g_service, g_category)
@@ -120,8 +143,13 @@ with tab2:
 
     # Action Button
     if st.button(f"🌍 Scrape World for '{gh_category}' Resumes"):
+        
+        # PRE-FLIGHT CHECKS
         if not gh_token:
             st.error("❌ GitHub Token is required to search globally.")
+            st.stop()
+        if not ms_connected:
+            st.error("❌ Please connect Microsoft OneDrive in the sidebar first.")
             st.stop()
             
         with st.status(f"Searching GitHub globally for '{gh_category}'...", expanded=True) as status:
