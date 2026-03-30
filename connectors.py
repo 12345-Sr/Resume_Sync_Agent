@@ -18,7 +18,6 @@ def get_flow_cache():
 
 # --- 1. NON-BLOCKING GOOGLE AUTH ---
 def get_gdrive_service():
-    """Returns (service, None) if logged in, or (None, auth_url) if not."""
     if "GOOGLE_CREDENTIALS_JSON" not in st.secrets:
         st.error("❌ Setup Error: GOOGLE_CREDENTIALS_JSON not found in Secrets.")
         return None, None
@@ -26,7 +25,6 @@ def get_gdrive_service():
     client_config = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
     redirect_uri = st.secrets.get("REDIRECT_URI")
 
-    # 1. SUCCESS: Already logged in
     if 'google_creds' in st.session_state:
         service = build('drive', 'v3', credentials=st.session_state.google_creds)
         return service, None
@@ -34,7 +32,6 @@ def get_gdrive_service():
     params = st.query_params
     flow_cache = get_flow_cache()
 
-    # 2. HANDLE REDIRECT
     if "code" in params and "state" in params:
         state = params["state"]
         if state in flow_cache:
@@ -49,8 +46,6 @@ def get_gdrive_service():
                 st.error(f"❌ Google Handshake failed: {e}")
                 st.query_params.clear()
         return None, None
-    
-    # 3. GENERATE LOGIN URL (Do not stop the app!)
     else:
         flow = Flow.from_client_config(client_config, scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri)
         auth_url, state = flow.authorization_url(prompt='consent', access_type='offline', include_granted_scopes='true')
@@ -72,14 +67,42 @@ def download_from_gdrive(service, file_id):
         _, done = downloader.next_chunk()
     return fh.getvalue()
 
-# --- 2. NON-BLOCKING MICROSOFT AUTH ---
+# --- 2. ROBUST MICROSOFT AUTH (WITH SILENT CACHE) ---
+def get_msal_app_and_cache(client_id):
+    """Creates the Microsoft Auth App and a Persistent Memory Cache."""
+    cache = msal.SerializableTokenCache()
+    if "msal_cache" in st.session_state:
+        cache.deserialize(st.session_state["msal_cache"])
+    
+    # 'organizations' allows anyone in your company's Microsoft Tenant to log in
+    app = msal.PublicClientApplication(
+        client_id, 
+        authority="https://login.microsoftonline.com/organizations", 
+        token_cache=cache
+    )
+    return app, cache
+
+def get_ms_token_silently(ms_client_id):
+    """Silently fetches a valid token from the background memory."""
+    app, cache = get_msal_app_and_cache(ms_client_id)
+    accounts = app.get_accounts()
+    
+    if accounts:
+        # If the token expired, this automatically gets a new one without bothering the user!
+        result = app.acquire_token_silent(MS_SCOPES, account=accounts[0])
+        if result and "access_token" in result:
+            if cache.has_state_changed:
+                st.session_state["msal_cache"] = cache.serialize()
+            return result["access_token"]
+    return None
+
 def is_ms_connected(ms_client_id):
-    """Checks if the Microsoft token exists in the session."""
-    return f"ms_token_{ms_client_id}" in st.session_state
+    """Checks if we have a valid token in the background."""
+    return get_ms_token_silently(ms_client_id) is not None
 
 def trigger_ms_login(ms_client_id, container=st):
-    """Triggers the Device Code flow in a specific UI container."""
-    app = msal.PublicClientApplication(ms_client_id, authority="https://login.microsoftonline.com/common")
+    """Triggers the initial Device Login flow for the user."""
+    app, cache = get_msal_app_and_cache(ms_client_id)
     flow = app.initiate_device_flow(scopes=MS_SCOPES)
     
     if "user_code" not in flow:
@@ -89,12 +112,12 @@ def trigger_ms_login(ms_client_id, container=st):
     container.warning("🔑 **Microsoft Login Required**")
     container.markdown(f"1. Go to: **[Microsoft Device Login]({flow['verification_uri']})**")
     container.markdown(f"2. Enter code: **`{flow['user_code']}`**")
-    container.info("⏳ *Waiting for you to complete login on Microsoft's website...*")
+    container.info("⏳ *Waiting for you to complete login...*")
     
-    # Blocks here safely until the user completes the login
     result = app.acquire_token_by_device_flow(flow)
     if "access_token" in result:
-        st.session_state[f"ms_token_{ms_client_id}"] = result
+        if cache.has_state_changed:
+            st.session_state["msal_cache"] = cache.serialize()
         st.rerun()
 
 # --- 3. GLOBAL GITHUB CONNECTOR ---
@@ -121,13 +144,15 @@ def get_global_github_resumes(github_token, keyword, max_results=10):
                 continue 
         return resumes
     except Exception as e:
-        st.error(f"❌ Global GitHub Search Error: {e}")
+        st.error(f"❌ Global Search Error: {e}")
         return []
 
 # --- 4. ONEDRIVE CONNECTORS ---
 def get_onedrive_files(ms_client_id, folder_path):
-    if not is_ms_connected(ms_client_id): return []
-    token = st.session_state[f"ms_token_{ms_client_id}"]["access_token"]
+    # Grabs the silent token that survives dropdown refreshes
+    token = get_ms_token_silently(ms_client_id)
+    if not token: return []
+    
     headers = {'Authorization': f'Bearer {token}'}
     url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder_path}:/children"
     response = requests.get(url, headers=headers)
@@ -136,8 +161,9 @@ def get_onedrive_files(ms_client_id, folder_path):
     return []
 
 def upload_to_onedrive(file_content, file_name, ms_client_id, folder_path):
-    if not is_ms_connected(ms_client_id): return None
-    token = st.session_state[f"ms_token_{ms_client_id}"]["access_token"]
+    token = get_ms_token_silently(ms_client_id)
+    if not token: return None
+    
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/octet-stream'}
     url = f"https://graph.microsoft.com/v1.0/me/drive/root:/{folder_path}/{file_name}:/content"
     response = requests.put(url, headers=headers, data=file_content)
